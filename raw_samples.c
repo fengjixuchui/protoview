@@ -5,7 +5,7 @@
 #include <furi/core/string.h>
 #include <furi.h>
 #include <furi_hal.h>
-#include "app_buffer.h"
+#include "raw_samples.h"
 
 /* Allocate and initialize a samples buffer. */
 RawSamplesBuffer *raw_samples_alloc(void) {
@@ -29,17 +29,47 @@ void raw_samples_reset(RawSamplesBuffer *s) {
     s->total = RAW_SAMPLES_NUM;
     s->idx = 0;
     s->short_pulse_dur = 0;
-    memset(s->level,0,sizeof(s->level));
-    memset(s->dur,0,sizeof(s->dur));
+    memset(s->samples,0,sizeof(s->samples));
     furi_mutex_release(s->mutex);
+}
+
+/* Set the raw sample internal index so that what is currently at
+ * offset 'offset', will appear to be at 0 index. */
+void raw_samples_center(RawSamplesBuffer *s, uint32_t offset) {
+    s->idx = (s->idx+offset) % RAW_SAMPLES_NUM;
 }
 
 /* Add the specified sample in the circular buffer. */
 void raw_samples_add(RawSamplesBuffer *s, bool level, uint32_t dur) {
     furi_mutex_acquire(s->mutex,FuriWaitForever);
-    s->level[s->idx] = level;
-    s->dur[s->idx] = dur;
+    s->samples[s->idx].level = level;
+    s->samples[s->idx].dur = dur;
     s->idx = (s->idx+1) % RAW_SAMPLES_NUM;
+    furi_mutex_release(s->mutex);
+}
+
+/* This is like raw_samples_add(), however in case a sample of the
+ * same level of the previous one is added, the duration of the last
+ * sample is updated instead. Needed mainly for the decoders build_message()
+ * methods: it is simpler to write an encoder of a signal like that,
+ * just creating messages piece by piece.
+ *
+ * This function is a bit slower so the internal data sampling should
+ * be performed with raw_samples_add(). */
+void raw_samples_add_or_update(RawSamplesBuffer *s, bool level, uint32_t dur) {
+    furi_mutex_acquire(s->mutex,FuriWaitForever);
+    uint32_t previdx = (s->idx-1) % RAW_SAMPLES_NUM;
+    if (s->samples[previdx].level == level &&
+        s->samples[previdx].dur != 0)
+    {
+        /* Update the last sample: it has the same level. */
+        s->samples[previdx].dur += dur;
+    } else {
+        /* Add a new sample. */
+        s->samples[s->idx].level = level;
+        s->samples[s->idx].dur = dur;
+        s->idx = (s->idx+1) % RAW_SAMPLES_NUM;
+    }
     furi_mutex_release(s->mutex);
 }
 
@@ -49,8 +79,8 @@ void raw_samples_get(RawSamplesBuffer *s, uint32_t idx, bool *level, uint32_t *d
 {
     furi_mutex_acquire(s->mutex,FuriWaitForever);
     idx = (s->idx + idx) % RAW_SAMPLES_NUM;
-    *level = s->level[idx];
-    *dur = s->dur[idx];
+    *level = s->samples[idx].level;
+    *dur = s->samples[idx].dur;
     furi_mutex_release(s->mutex);
 }
 
@@ -60,8 +90,7 @@ void raw_samples_copy(RawSamplesBuffer *dst, RawSamplesBuffer *src) {
     furi_mutex_acquire(dst->mutex,FuriWaitForever);
     dst->idx = src->idx;
     dst->short_pulse_dur = src->short_pulse_dur;
-    memcpy(dst->level,src->level,sizeof(dst->level));
-    memcpy(dst->dur,src->dur,sizeof(dst->dur));
+    memcpy(dst->samples,src->samples,sizeof(dst->samples));
     furi_mutex_release(src->mutex);
     furi_mutex_release(dst->mutex);
 }
